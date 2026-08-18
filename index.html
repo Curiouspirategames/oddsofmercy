@@ -1,0 +1,1607 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Odds of Mercy</title>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;700;900&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body { margin: 0; background: #0b0a16; font-family: sans-serif; }
+    @keyframes shakeDie {
+      0%{transform:rotate(0) scale(1);} 20%{transform:rotate(-14deg) scale(.88);}
+      45%{transform:rotate(16deg) scale(1.06);} 65%{transform:rotate(-8deg) scale(.94);}
+      82%{transform:rotate(5deg) scale(1.02);} 100%{transform:rotate(0) scale(1);}
+    }
+    @keyframes pulseGlow  {0%,100%{box-shadow:0 0 30px #a78bfa33;}50%{box-shadow:0 0 60px #a78bfa77;}}
+    @keyframes pulseAmber {0%,100%{box-shadow:0 0 20px #f59e0b44;}50%{box-shadow:0 0 40px #f59e0b88;}}
+    @keyframes pulseGreen {0%,100%{box-shadow:0 0 20px #22c55e44;}50%{box-shadow:0 0 40px #22c55e88;}}
+    @keyframes fadeUp {from{opacity:0;transform:translateY(14px);}to{opacity:1;transform:translateY(0);}}
+    .fade-up{animation:fadeUp .45s ease forwards;}
+    input:focus, textarea:focus { border-color: #c9a84c !important; outline: none; }
+    ::-webkit-scrollbar { width: 4px; }
+    ::-webkit-scrollbar-track { background: #0b0a16; }
+    ::-webkit-scrollbar-thumb { background: #2d2b42; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef } = React;
+
+// ─── STORAGE (works as a Claude artifact AND as a plain web page) ─────────────
+
+const GAME_URL  = "https://curiouspirategames.github.io/oddsofmercy/";
+const STORE_KEY = "odds-of-mercy:v1";
+const memoryStore = {};
+
+async function storeGet(key) {
+  try {
+    if (typeof window !== "undefined" && window.storage && window.storage.get) {
+      const r = await window.storage.get(key);
+      if (r && r.value) return JSON.parse(r.value);
+      return null;
+    }
+  } catch (_) {}
+  try {
+    if (typeof localStorage !== "undefined") {
+      const v = localStorage.getItem(key);
+      return v ? JSON.parse(v) : null;
+    }
+  } catch (_) {}
+  return memoryStore[key] || null;
+}
+
+async function storeSet(key, value) {
+  const s = JSON.stringify(value);
+  try {
+    if (typeof window !== "undefined" && window.storage && window.storage.set) {
+      await window.storage.set(key, s);
+      return true;
+    }
+  } catch (_) {}
+  try {
+    if (typeof localStorage !== "undefined") { localStorage.setItem(key, s); return true; }
+  } catch (_) {}
+  memoryStore[key] = value;
+  return true;
+}
+
+// ─── GAME CONFIG ──────────────────────────────────────────────────────────────
+
+const DIE_DEFAULTS = {
+  a: "Hours of Teasing", aCurse: "Penalty Teasing",
+  b: "Tasks",            bCurse: "Penalty Tasks",
+  target: "Edges",
+};
+
+// The target die is always as big as the largest total the two dice can make,
+// so your total can reach it but never overshoot — making the chance of an exact
+// landing exactly 1-in-(target). Easy uses the same dice as Medium but rolls the
+// target twice and keeps whichever is closest, which roughly halves the wait.
+// All figures verified by simulation (500k+ trials per tier).
+const DIFFICULTY_TIERS = {
+  easy:   { label:"Easy",   dieA:3, dieB:4,  targetRolls:2, avgDays:4  },
+  medium: { label:"Medium", dieA:3, dieB:4,  targetRolls:1, avgDays:7  },
+  hard:   { label:"Hard",   dieA:6, dieB:8,  targetRolls:1, avgDays:14 },
+  brutal: { label:"Brutal", dieA:8, dieB:12, targetRolls:1, avgDays:20 },
+};
+
+const targetSizeOf = t => t.dieA + t.dieB;
+
+const PUNISHMENT_CONFIGS = {
+  0: { label:"None",    plain:"no extra dice",        extraA:0, extraB:0 },
+  1: { label:"Level 1", plain:"+1 extra teasing die", extraA:1, extraB:0 },
+  2: { label:"Level 2", plain:"+1 extra tasks die",   extraA:0, extraB:1 },
+  3: { label:"Level 3", plain:"+2 extra teasing dice",extraA:2, extraB:0 },
+};
+
+const rollD = sides => Math.floor(Math.random() * sides) + 1;
+
+// ─── DAILY MODIFIERS ────────────────────────────────────────────────────────
+// Rolled once per dice roll, independent of everything else. Ten real modifiers
+// plus ten blanks gives each specific modifier exactly a 1-in-20 chance, and
+// "no modifier" a 50% chance overall. The library is fixed text you toggle on
+// or off with a button — editing wording is done by writing a new custom one,
+// which keeps the interaction a tap rather than a text box for the common case.
+const DEFAULT_MODIFIERS = [
+  "Try not to let your thighs touch today. If you notice them touching, immediately spread your legs apart.",
+  "Refer to yourself in third person in all messages and voice notes in the server today.",
+  "Every time you want to touch or physically tease yourself today, you must announce this in Denial Den and tell the server exactly how you are about to play.",
+  "Do at least 15 minutes of exercise today, either while teasing or directly after.",
+  "Keep a hand resting on your crotch for 5 minutes every hour, for 4 hours today.",
+  "No touching yourself anywhere below the collarbone today outside of your play sessions (and hygiene needs).",
+  "Whenever you sit down today, your knees must be touching.",
+  "Kegels — do 100 kegels over the course of the day.",
+  "Ask the server for a new nickname, and change your name in the server to it today.",
+  "Ask somebody in the server for a task to complete today.",
+];
+
+function buildModifierPool(activeList) {
+  const real = activeList.filter(m => m && m.trim());
+  const blanksNeeded = Math.max(0, 20 - real.length);
+  return [...real, ...Array(blanksNeeded).fill(null)];
+}
+
+function rollModifier(activeList) {
+  const pool = buildModifierPool(activeList);
+  return pool[Math.floor(Math.random() * pool.length)];
+}
+
+function getEffectiveConfig(level, difficultyKey) {
+  const tier = DIFFICULTY_TIERS[difficultyKey];
+  const pun  = PUNISHMENT_CONFIGS[level];
+  return {
+    aDice: Array(1 + pun.extraA).fill(tier.dieA),
+    bDice: Array(1 + pun.extraB).fill(tier.dieB),
+    aBase: 1, bBase: 1,
+    targetDie: targetSizeOf(tier),
+    targetRolls: tier.targetRolls,
+  };
+}
+
+function poolRange(config) {
+  const dice = [...config.aDice, ...config.bDice];
+  return { min: dice.length, max: dice.reduce((x,y) => x+y, 0) };
+}
+
+// ─── BONUS EVENTS ─────────────────────────────────────────────────────────────
+// Two events, deliberate opposites, judged on the three main dice by WHERE each
+// lands in its own range rather than on exact faces — so the odds hold on every
+// difficulty and punishment dice can't change how often they fire.
+//   Surge — every die in the TOP third    → a flat bonus, added not multiplied
+//   Hush  — every die in the BOTTOM third → free reroll (the rarer of the two)
+// Doubling belongs to the one-away rule alone, so Surge stays additive.
+
+const isTop3    = (v,s) => v >  2*s/3;    // top third
+const isBottom3 = (v,s) => v <= s/3;      // bottom third
+
+function checkEvents(coreDice) {
+  const every = fn => coreDice.every(([v,s]) => fn(v,s));
+  return {
+    // bonus = the three main dice added together
+    surge: { triggered: every(isTop3), bonus: coreDice.reduce((sum,[v]) => sum + v, 0) },
+    hush:  { triggered: every(isBottom3) },
+  };
+}
+
+// ─── ROLL LOGIC ───────────────────────────────────────────────────────────────
+
+function pickTarget(options, total) {
+  return options.reduce((best, v) => {
+    const dv = Math.abs(v - total), db = Math.abs(best - total);
+    if (dv < db) return v;
+    if (dv === db) return Math.min(v, best);
+    return best;
+  });
+}
+
+function computeResult(aRolls, bRolls, targetOptions, config) {
+  const aTotal = aRolls.reduce((x,y)=>x+y,0);
+  const bTotal = bRolls.reduce((x,y)=>x+y,0);
+  const total  = aTotal + bTotal;
+  // Punishment dice still count towards the total, but they carry their own
+  // separately-named task — so they're tracked apart from the base dice.
+  const aBase  = aRolls[0];
+  const bBase  = bRolls[0];
+  const aPun   = aRolls.slice(1).reduce((x,y)=>x+y,0);
+  const bPun   = bRolls.slice(1).reduce((x,y)=>x+y,0);
+  const targetRoll = pickTarget(targetOptions, total);
+  const gap = Math.abs(total - targetRoll);
+
+  const allDice = [
+    ...aRolls.map((v,i) => ({ value:v, sides:config.aDice[i], source:"a", index:i })),
+    ...bRolls.map((v,i) => ({ value:v, sides:config.bDice[i], source:"b", index:i })),
+    { value:targetRoll, sides:config.targetDie, source:"target", index:0 },
+  ];
+  const core = [[aRolls[0], config.aDice[0]], [bRolls[0], config.bDice[0]], [targetRoll, config.targetDie]];
+  const events = checkEvents(core);
+  const isNearMiss = gap === 1;
+
+  return {
+    aRolls, bRolls, targetOptions, targetRoll, aTotal, bTotal, total, gap,
+    aBase, bBase, aPun, bPun,
+    isWin: gap === 0, isNearMiss,
+    doubled: isNearMiss,          // only the one-away rule doubles
+    allDice, events,
+  };
+}
+
+function rollAll(config) {
+  return computeResult(
+    config.aDice.map(rollD),
+    config.bDice.map(rollD),
+    Array.from({ length: config.targetRolls }, () => rollD(config.targetDie)),
+    config
+  );
+}
+
+// ─── HISTORY ──────────────────────────────────────────────────────────────────
+// A "run" is everything from your first roll after a win up to and including the
+// next win. Day 1 is the first roll of a run. That's all that's tracked.
+
+function runStats(rolls) {
+  const total = rolls.length;
+  const latestIsWin = total > 0 && rolls[total - 1].outcome === "win";
+
+  // find the win before the roll we're currently counting from
+  let prevWinIdx = -1;
+  for (let i = (latestIsWin ? total - 2 : total - 1); i >= 0; i--) {
+    if (rolls[i].outcome === "win") { prevWinIdx = i; break; }
+  }
+  const currentDay = total === 0 ? 0 : (total - 1) - prevWinIdx;
+
+  // lengths of every finished run, oldest first
+  const completed = [];
+  let start = 0;
+  rolls.forEach((r, i) => {
+    if (r.outcome === "win") { completed.push(i - start + 1); start = i + 1; }
+  });
+
+  return { total, currentDay, latestIsWin, completed };
+}
+
+// ─── ROLL LOCK / COUNTDOWN ────────────────────────────────────────────────────
+// Two independent gates keep the button locked: 24 hours must have passed
+// since the last roll, AND that roll's tasks must be marked complete. Both
+// have to clear before rolling again — neither one alone is enough.
+
+const ROLL_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+
+function msRemaining(lastRollTs) {
+  if (!lastRollTs) return 0;
+  const remaining = lastRollTs + ROLL_COOLDOWN_MS - Date.now();
+  return Math.max(0, remaining);
+}
+
+function formatCountdown(ms) {
+  const totalSec = Math.ceil(ms / 1000);
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const s = totalSec % 60;
+  return `${String(h).padStart(2,"0")}:${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}`;
+}
+
+// Ticks once a second while mounted. Renders nothing itself — calls back with
+// the remaining ms so the parent decides how to display it.
+function useCountdown(lastRollTs) {
+  const [remaining, setRemaining] = React.useState(() => msRemaining(lastRollTs));
+  React.useEffect(() => {
+    setRemaining(msRemaining(lastRollTs));
+    if (!lastRollTs) return;
+    const id = setInterval(() => setRemaining(msRemaining(lastRollTs)), 1000);
+    return () => clearInterval(id);
+  }, [lastRollTs]);
+  return remaining;
+}
+
+// ─── DICE SHAPES ──────────────────────────────────────────────────────────────
+
+function TriangleDie({ value, color="#c9a84c", size=54, glowing, dim }) {
+  const d = (value !== null && value !== undefined) ? value : "?";
+  return (
+    <svg width={size} height={size} viewBox="0 0 100 100"
+      style={{ filter: glowing ? `drop-shadow(0 0 8px ${color})` : "none", opacity: dim ? .35 : 1, transition:"all .3s", flexShrink:0 }}>
+      <polygon points="50,5 95,92 5,92" fill="#1a1828" stroke={color} strokeWidth="3" strokeLinejoin="round"/>
+      <text x="50" y="80" textAnchor="middle" fill={color} fontSize="30" fontWeight="bold" fontFamily="serif">{d}</text>
+    </svg>
+  );
+}
+
+function SquareDie({ value, color="#60a5fa", size=54, glowing, dim }) {
+  const d = (value !== null && value !== undefined) ? value : "?";
+  return (
+    <svg width={size} height={size} viewBox="0 0 100 100"
+      style={{ filter: glowing ? `drop-shadow(0 0 8px ${color})` : "none", opacity: dim ? .35 : 1, transition:"all .3s", flexShrink:0 }}>
+      <rect x="6" y="6" width="88" height="88" rx="16" fill="#1a1828" stroke={color} strokeWidth="3"/>
+      <text x="50" y="66" textAnchor="middle" fill={color} fontSize="34" fontWeight="bold" fontFamily="serif">{d}</text>
+    </svg>
+  );
+}
+
+function StarDie({ value, color="#f472b6", size=66, glowing, dim }) {
+  const pts = Array.from({length:10}, (_,i) => {
+    const ang=(i*36-90)*Math.PI/180, r=i%2===0?43:27;
+    return `${50+r*Math.cos(ang)},${50+r*Math.sin(ang)}`;
+  }).join(" ");
+  const d = (value !== null && value !== undefined) ? value : "?";
+  return (
+    <svg width={size} height={size} viewBox="0 0 100 100"
+      style={{ filter: glowing ? `drop-shadow(0 0 12px ${color})` : "none", opacity: dim ? .3 : 1, transition:"all .3s", flexShrink:0 }}>
+      <polygon points={pts} fill="#1a1828" stroke={color} strokeWidth="3"/>
+      <text x="50" y="58" textAnchor="middle" fill={color} fontSize="26" fontWeight="bold" fontFamily="serif">{d}</text>
+    </svg>
+  );
+}
+
+function AnimatedDie({ shape, value, color, glowing, dim, delay=0, onClick, clickable, size }) {
+  const [show, setShow] = React.useState(false);
+  const [shaking, setShaking] = React.useState(false);
+  React.useEffect(() => {
+    if (value === null) { setShow(false); return; }
+    setShaking(true); setShow(false);
+    const t = setTimeout(() => { setShaking(false); setShow(true); }, delay + 420);
+    return () => clearTimeout(t);
+  }, [value, delay]);
+
+  const v = show ? value : null;
+  const style = shaking
+    ? { animation:"shakeDie .4s ease-in-out", opacity:.35, display:"inline-block" }
+    : { display:"inline-block", cursor: clickable ? "pointer" : "default", transition:"transform .15s" };
+  const Shape = shape === "triangle" ? TriangleDie : shape === "star" ? StarDie : SquareDie;
+
+  return (
+    <div style={style} onClick={clickable ? onClick : undefined}
+      onMouseEnter={e => { if (clickable) e.currentTarget.style.transform="scale(1.1)"; }}
+      onMouseLeave={e => { if (clickable) e.currentTarget.style.transform="scale(1)"; }}>
+      <Shape value={v} color={color} glowing={glowing && show} dim={dim} size={size}/>
+    </div>
+  );
+}
+
+function LabelledDie({ slot, glowing, rerollMode, onReroll }) {
+  return (
+    <div style={{ display:"flex", flexDirection:"column", alignItems:"center", gap:3 }}>
+      <AnimatedDie shape={slot.shape} value={slot.value} color={slot.color}
+        glowing={glowing} delay={slot.delay} clickable={rerollMode}
+        onClick={() => onReroll && onReroll(slot)}/>
+      <span style={{ color:slot.color, fontSize:9.5, opacity:.9, maxWidth:72, textAlign:"center", lineHeight:1.25 }}>{slot.label}</span>
+      <span style={{ color:"#4a4860", fontSize:8.5 }}>1–{slot.sides}</span>
+    </div>
+  );
+}
+
+// ─── SMALL PIECES ─────────────────────────────────────────────────────────────
+
+function SectionLabel({ children, hint }) {
+  return (
+    <div style={{ marginBottom:10 }}>
+      <div style={{ color:"#8b8aa0", fontSize:11, letterSpacing:".14em", textTransform:"uppercase" }}>{children}</div>
+      {hint && <div style={{ color:"#5a5876", fontSize:11, lineHeight:1.5, marginTop:4 }}>{hint}</div>}
+    </div>
+  );
+}
+
+function Card({ children, style }) {
+  return (
+    <div style={{ background:"#0f0e1a", border:"1px solid #1e1c30", borderRadius:18, padding:"20px 18px", marginBottom:14, ...style }}>
+      {children}
+    </div>
+  );
+}
+
+function Collapsible({ title, right, open, onToggle, children }) {
+  return (
+    <div style={{ background:"#0f0e1a", border:"1px solid #1e1c30", borderRadius:18, marginBottom:14, overflow:"hidden" }}>
+      <button onClick={onToggle} style={{
+        width:"100%", display:"flex", alignItems:"center", justifyContent:"space-between",
+        background:"transparent", border:"none", padding:"18px", cursor:"pointer",
+      }}>
+        <span style={{ color:"#c9a84c", fontSize:13, fontWeight:700, fontFamily:"'Cinzel', Georgia, serif", letterSpacing:".05em" }}>{title}</span>
+        <span style={{ display:"flex", alignItems:"center", gap:10 }}>
+          {right && <span style={{ color:"#6b6a80", fontSize:10.5 }}>{right}</span>}
+          <span style={{ color:"#6b6a80", fontSize:14, transform: open?"rotate(180deg)":"rotate(0)", transition:"transform .2s" }}>▾</span>
+        </span>
+      </button>
+      {open && <div className="fade-up" style={{ padding:"0 18px 20px" }}>{children}</div>}
+    </div>
+  );
+}
+
+// ─── HOW TO PLAY ──────────────────────────────────────────────────────────────
+
+function HowItWorks({ open, onToggle, names, level, difficultyKey }) {
+  const cfg = getEffectiveConfig(level, difficultyKey);
+  const tier = DIFFICULTY_TIERS[difficultyKey];
+  const range = poolRange(cfg);
+  const punish = PUNISHMENT_CONFIGS[level];
+
+  const Step = ({ n, title, children }) => (
+    <div style={{ display:"flex", gap:12, marginBottom:16 }}>
+      <div style={{ flexShrink:0, width:24, height:24, borderRadius:12, background:"#1e1c2e",
+        border:"1px solid #2d2b42", color:"#c9a84c", fontSize:12, fontWeight:700,
+        display:"flex", alignItems:"center", justifyContent:"center" }}>{n}</div>
+      <div style={{ flex:1 }}>
+        <div style={{ color:"#e2e0f0", fontWeight:700, fontSize:12.5, marginBottom:3 }}>{title}</div>
+        <div style={{ color:"#a8a6c0", fontSize:12.5, lineHeight:1.65 }}>{children}</div>
+      </div>
+    </div>
+  );
+
+  return (
+    <Collapsible title="How to play — read me first" open={open} onToggle={onToggle}>
+      <div style={{ background:"#13112a", border:"1px solid #221f38", borderRadius:12,
+        padding:"12px 14px", marginBottom:18, color:"#c9a84c", fontSize:12.5, lineHeight:1.6 }}>
+        <strong>In one sentence:</strong> roll two dice, add them together, and hope the total lands on
+        the same number as the target die. Whatever you roll becomes tasks you owe before rolling again —
+        and if you land <strong>one</strong> away, the target task doubles.
+      </div>
+
+      <div style={{ display:"flex", gap:12, marginBottom:16, background:"#1a1424", border:"1px solid #4c3a7a",
+        borderRadius:10, padding:"11px 13px" }}>
+        <div style={{ flexShrink:0, width:24, height:24, borderRadius:12, background:"#2d1b4e",
+          border:"1px solid #6b4fa0", color:"#c084fc", fontSize:12, fontWeight:700,
+          display:"flex", alignItems:"center", justifyContent:"center" }}>✎</div>
+        <div style={{ flex:1 }}>
+          <div style={{ color:"#e9d5ff", fontWeight:700, fontSize:12.5, marginBottom:3 }}>Before you start — name your own dice</div>
+          <div style={{ color:"#c8b6e0", fontSize:12.5, lineHeight:1.65 }}>
+            Every die's task is yours to set — currently <strong>{names.a}</strong>,{" "}
+            <strong>{names.b}</strong>, and <strong>{names.target}</strong> as the target. Change any of
+            them in <strong>Set up your game</strong> below, any time, even between days.
+          </div>
+        </div>
+      </div>
+
+      <Step n="1" title="Roll your two dice and add them up">
+        The two numbers add together into <strong style={{color:"#c9a84c"}}>your total</strong>, which will
+        land between <strong style={{color:"#c9a84c"}}>{range.min} and {range.max}</strong>.
+      </Step>
+
+      <Step n="2" title="The target die is rolled too">
+        The <strong style={{color:"#f472b6"}}>target</strong> lands between{" "}
+        <strong style={{color:"#f472b6"}}>1 and {cfg.targetDie}</strong> — sized so your total can reach it
+        but never overshoot the top of its range.
+        {cfg.targetRolls > 1 && <> On {tier.label} the target is rolled <strong>{cfg.targetRolls} times</strong> and
+        whichever lands closest to your total is the one that counts.</>}
+      </Step>
+
+      <Step n="3" title="Three things can happen">
+        <div style={{ display:"flex", flexDirection:"column", gap:8, marginTop:8 }}>
+          <div style={{ background:"#1a1133", border:"1px solid #4c3a7a", borderRadius:9, padding:"9px 11px" }}>
+            <div style={{ color:"#a78bfa", fontWeight:700, fontSize:12, marginBottom:2 }}>Same number → you win</div>
+            <div style={{ color:"#c4a8ff", fontSize:11.5 }}>Your total and the target match exactly. Mercy granted.</div>
+          </div>
+          <div style={{ background:"#1c0a0a", border:"1px solid #7a2d24", borderRadius:9, padding:"9px 11px" }}>
+            <div style={{ color:"#e74c3c", fontWeight:700, fontSize:12, marginBottom:2 }}>One away → {names.target} doubles</div>
+            <div style={{ color:"#e57373", fontSize:11.5 }}>
+              Miss by a single number and your {names.target} doubles. Everything else stays as rolled —
+              the closer you get, the worse it stings.
+            </div>
+          </div>
+          <div style={{ background:"#11101e", border:"1px solid #2d2b42", borderRadius:9, padding:"9px 11px" }}>
+            <div style={{ color:"#c9a84c", fontWeight:700, fontSize:12, marginBottom:2 }}>Anything else → denied</div>
+            <div style={{ color:"#8b8aa0", fontSize:11.5 }}>Owe the tasks as rolled, then try again tomorrow.</div>
+          </div>
+        </div>
+      </Step>
+      <Step n="4" title="The numbers become your tasks">
+        Each die is tied to an activity. Roll a 3 on the {names.b} die and you owe 3 {names.b}. This applies
+        win or lose — winning just also unlocks the reward.
+      </Step>
+
+      <Step n="5" title="Difficulty — pick before you start">
+        Bigger dice mean a wider range to land on, so wins come further apart and tasks get larger. You're on{" "}
+        <strong style={{color:"#f472b6"}}>{tier.label}</strong>, averaging about <strong>{tier.avgDays} days</strong> per
+        win. Every mode needs an exact landing — difficulty never changes that rule.
+      </Step>
+
+      <Step n="6" title="Punishment — you apply it to yourself">
+        Adds extra dice to your total, pushing your numbers past the target's range. Each punishment die
+        carries <strong>its own separate task</strong>, which you can name yourself below — so it can be an
+        entirely different activity rather than more of the same. It runs on the honour system: if you break
+        a rule you set yourself, raise the level. Lower it whenever you feel you've served it — but only after
+        completing at least one full roll while carrying it. You're on{" "}
+        <strong style={{color:"#c9a84c"}}>{punish.label}</strong> ({punish.plain}).
+      </Step>
+
+      <Step n="7" title="Two bonus events — opposites of each other">
+        Judged on your three main dice by how high or low each one lands in its own range, so they fire
+        just as often on Easy as on Brutal.
+        <div style={{ display:"flex", flexDirection:"column", gap:8, marginTop:6 }}>
+          <div><span style={{ color:"#f59e0b", fontWeight:700 }}>Surge</span> — every die rolls in the
+            <strong> top third</strong> of its range. Add the three dice together and owe that many extra
+            {" "}{names.target} on top. Somewhere between 1 roll in 9 and 1 in 22, depending on difficulty.</div>
+          <div><span style={{ color:"#22c55e", fontWeight:700 }}>Hush</span> — every die rolls in the
+            <strong> bottom third</strong>. Reroll any die you like. The rarest thing in the game —
+            roughly 1 roll in 25 to 1 in 40.</div>
+        </div>
+        <div style={{ marginTop:8, color:"#5a5876", fontSize:11.5 }}>
+          Doubling only ever comes from landing one away, and only ever hits the {names.target} —
+          a Surge adds to what you owe rather than multiplying it.
+        </div>
+      </Step>
+
+      <Step n="8" title="A daily modifier might also apply">
+        Separate from the dice — rolled once per day alongside them. Ten possible modifiers, each a 1-in-20
+        chance; the rest of the time (10-in-20) nothing extra applies. None are absolute: skip or adjust
+        anything that hits a limit for you. Fully editable in <strong>Set up your game</strong>.
+      </Step>
+
+      <Step n="9" title="Once you've done the tasks, mark them complete">
+        A <strong>Mark tasks complete</strong> button appears after you roll. Pressing it is the only way to
+        clear the task gate — the roll button also needs the 24-hour timer to run out, so both have to be
+        true before you can roll again.
+      </Step>
+
+      <div style={{ marginTop:4, paddingTop:14, borderTop:"1px solid #1e1c30", color:"#5a5876", fontSize:11.5, lineHeight:1.6 }}>
+        One roll allowed at a time — locked for 24 hours after each roll, and until you mark that roll's
+        tasks complete. Your rolls are saved on this device, counting the days of your current run, which
+        ends the moment you win.
+      </div>
+    </Collapsible>
+  );
+}
+
+// ─── SETUP ────────────────────────────────────────────────────────────────────
+
+function UsernameField({ username, onChange, disabled }) {
+  return (
+    <div style={{ marginBottom:18 }}>
+      <SectionLabel hint="Added to your Discord summary so people know whose roll it is.">Your name</SectionLabel>
+      <input type="text" value={username} disabled={disabled}
+        onChange={e => onChange(e.target.value)}
+        style={{ background:"#13112a", border:"1.5px solid #2d2b42", borderRadius:8,
+          padding:"10px 12px", color: disabled?"#3d3b58":"#e2e0f0", fontSize:13, width:"100%",
+          opacity: disabled?.5:1, cursor: disabled?"not-allowed":"text", fontFamily:"sans-serif", outline:"none" }}/>
+    </div>
+  );
+}
+
+function DifficultySelector({ difficulty, onChange, disabled, level, names }) {
+  const tier = DIFFICULTY_TIERS[difficulty];
+  const cfg = getEffectiveConfig(level, difficulty);
+  const range = poolRange(cfg);
+
+  return (
+    <div>
+      <SectionLabel hint="Bigger dice mean bigger numbers and longer odds. Every mode still needs an exact landing.">
+        Difficulty
+      </SectionLabel>
+      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8, marginBottom:10 }}>
+        {Object.entries(DIFFICULTY_TIERS).map(([key, t]) => {
+          const on = difficulty === key;
+          return (
+            <button key={key} onClick={() => !disabled && onChange(key)} disabled={disabled}
+              style={{ border:`1.5px solid ${on?"#f472b6":"#2d2b42"}`, background: on?"#1e1424":"transparent",
+                borderRadius:10, padding:"11px 10px", textAlign:"left",
+                cursor: disabled?"not-allowed":"pointer", transition:"all .2s", opacity: disabled?.6:1, fontFamily:"sans-serif" }}>
+              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"baseline", marginBottom:3 }}>
+                <span style={{ color: on?"#f472b6":"#c8c6dc", fontSize:13, fontWeight:700 }}>{t.label}</span>
+                <span style={{ color: on?"#f472b6":"#6b6a80", fontSize:10 }}>~{t.avgDays} days</span>
+              </div>
+              <div style={{ color:"#6b6a80", fontSize:9.5, lineHeight:1.35 }}>
+                total 2–{t.dieA+t.dieB} · target 1–{targetSizeOf(t)}{t.targetRolls>1?` ×${t.targetRolls}`:""}
+              </div>
+            </button>
+          );
+        })}
+      </div>
+
+      <div style={{ background:"#13112a", border:"1px solid #221f38", borderRadius:10,
+        padding:"11px 13px", fontSize:11.5, lineHeight:1.65, color:"#8b8aa0" }}>
+        <div style={{ color:"#f472b6", fontWeight:700, marginBottom:4 }}>{tier.label} — what to expect</div>
+        <div>
+          Your <strong style={{color:"#c9a84c"}}>{names.a}</strong> die rolls 1–{tier.dieA} and your{" "}
+          <strong style={{color:"#60a5fa"}}>{names.b}</strong> die rolls 1–{tier.dieB}, so your total lands on{" "}
+          <strong style={{color:"#c9a84c"}}>{range.min}–{range.max}</strong>.
+        </div>
+        <div style={{ marginTop:6 }}>
+          The <strong style={{color:"#f472b6"}}>{names.target}</strong> target rolls{" "}
+          <strong style={{color:"#f472b6"}}>1–{cfg.targetDie}</strong>
+          {tier.targetRolls > 1
+            ? <>, <strong>twice over</strong>, and the closer of the two counts — which is what makes this the
+                quickest mode at roughly <strong>{tier.avgDays} days</strong> per win.</>
+            : <>. Both must land on the same number, working out at roughly <strong>{tier.avgDays} days</strong> per win.</>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PunishmentSelector({ level, onChange, disabled }) {
+  return (
+    <div>
+      <SectionLabel hint="Extra dice you add to your own total. Stacks on top of difficulty and makes a win harder.">
+        Punishment
+      </SectionLabel>
+      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8, marginBottom:10 }}>
+        {[0,1,2,3].map(l => {
+          const on = level === l, p = PUNISHMENT_CONFIGS[l];
+          return (
+            <button key={l} onClick={() => !disabled && onChange(l)} disabled={disabled}
+              style={{ border:`1.5px solid ${on?"#c9a84c":"#2d2b42"}`, background: on?"#1e1c2e":"transparent",
+                borderRadius:10, padding:"10px", textAlign:"left",
+                cursor: disabled?"not-allowed":"pointer", transition:"all .2s", opacity: disabled?.6:1, fontFamily:"sans-serif" }}>
+              <div style={{ color: on?"#c9a84c":"#c8c6dc", fontSize:12.5, fontWeight:700, marginBottom:2 }}>{p.label}</div>
+              <div style={{ color:"#6b6a80", fontSize:9.5, lineHeight:1.35 }}>{p.plain}</div>
+            </button>
+          );
+        })}
+      </div>
+      <div style={{ background:"#13112a", border:"1px solid #221f38", borderRadius:10,
+        padding:"11px 13px", fontSize:11.5, lineHeight:1.65, color:"#8b8aa0" }}>
+        <div style={{ color:"#c9a84c", fontWeight:700, marginBottom:4 }}>This one runs on the honour system</div>
+        <div>
+          Nothing forces a punishment on you — it's yours to apply. If you slip up or break a rule you've set
+          for yourself, come back here and raise the level before your next roll.
+        </div>
+        <div style={{ marginTop:6 }}>
+          Taking it off is your call too. Serve it for however long feels fair — a day, a week, whatever you
+          decide — then lower it again. The only fixed rule: <strong style={{color:"#c8c6dc"}}>you must complete
+          at least one full roll while carrying it</strong> before it can come off.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ActionNameEditor({ names, onChange, level, disabled, confirmed, onConfirm, needsAttention, scrollRef }) {
+  const pun = PUNISHMENT_CONFIGS[level];
+  const fields = [
+    { key:"a", label:"First die (triangle)" },
+    { key:"aCurse", label:"Punishment die — its own task", show: pun.extraA > 0 },
+    { key:"b", label:"Second die (square)" },
+    { key:"bCurse", label:"Punishment die — its own task", show: pun.extraB > 0 },
+    { key:"target", label:"Target die (star)" },
+  ].filter(f => f.show !== false);
+
+  return (
+    <div ref={scrollRef} style={{ scrollMarginTop:12 }}>
+      <SectionLabel hint="What each die means for you. The number rolled becomes that many of this activity.">
+        What the dice stand for
+      </SectionLabel>
+
+      {needsAttention && (
+        <div className="fade-up" style={{ background:"#1a1424", border:"1.5px solid #c084fc", borderRadius:8,
+          padding:"9px 12px", marginBottom:10, color:"#e9d5ff", fontSize:11.5, lineHeight:1.5 }}>
+          Check these before your first roll — keep them or change them, then confirm below.
+        </div>
+      )}
+
+      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8, marginBottom:12 }}>
+        {fields.map(({ key, label }) => (
+          <div key={key} style={{ display:"flex", flexDirection:"column", gap:4 }}>
+            <label style={{ color:"#6b6a80", fontSize:10, letterSpacing:".04em" }}>{label}</label>
+            <input type="text" value={names[key]} disabled={disabled}
+              onChange={e => onChange({ ...names, [key]: e.target.value })}
+              style={{ background:"#13112a", border:`1.5px solid ${needsAttention?"#4c3a7a":"#2d2b42"}`, borderRadius:6,
+                padding:"8px 10px", color: disabled?"#3d3b58":"#c9a84c", fontSize:12, width:"100%",
+                opacity: disabled?.5:1, cursor: disabled?"not-allowed":"text", fontFamily:"sans-serif", outline:"none" }}/>
+          </div>
+        ))}
+      </div>
+
+      {!disabled && (
+        confirmed ? (
+          <div style={{ color:"#4ade80", fontSize:11, display:"flex", alignItems:"center", gap:6 }}>
+            ✓ Names confirmed
+          </div>
+        ) : (
+          <button onClick={onConfirm} style={{
+            width:"100%", padding:"10px", background:"#2d1b4e", border:"1.5px solid #6b4fa0",
+            borderRadius:8, color:"#e9d5ff", fontSize:12.5, fontWeight:700, cursor:"pointer", fontFamily:"sans-serif" }}>
+            Confirm these names
+          </button>
+        )
+      )}
+    </div>
+  );
+}
+
+// ─── MODIFIER EDITOR ──────────────────────────────────────────────────────────
+// `library` = every modifier text that exists (defaults + any custom ones added).
+// `active`  = which of those are currently switched on and go into today's pool.
+// Toggling is a single tap; only adding a brand new custom modifier needs typing.
+
+function ModifierEditor({ library, active, onToggle, onAdd, onRemoveCustom, onResetDefaults, disabled }) {
+  const [draft, setDraft] = React.useState("");
+  const [adding, setAdding] = React.useState(false);
+  const activeCount = library.filter(m => active[m]).length;
+
+  const submitDraft = () => {
+    if (!draft.trim() || disabled) return;
+    onAdd(draft.trim());
+    setDraft(""); setAdding(false);
+  };
+
+  return (
+    <div>
+      <SectionLabel hint={`Rolled alongside your dice. Each switched-on modifier is a 1-in-20 chance; the rest of the time (${20 - activeCount} in 20) nothing extra applies.`}>
+        Daily modifiers
+      </SectionLabel>
+
+      <div style={{ background:"#13112a", border:"1px solid #221f38", borderRadius:10,
+        padding:"11px 13px", fontSize:11.5, lineHeight:1.6, color:"#8b8aa0", marginBottom:12 }}>
+        <strong style={{color:"#c9a84c"}}>None of these are absolute.</strong> If a modifier hits a limit —
+        physical, comfort, or otherwise — you don't have to do it. Switch anything off any time, including
+        between days.
+      </div>
+
+      <div style={{ display:"flex", flexDirection:"column", gap:6, marginBottom:12 }}>
+        {library.map((m) => {
+          const on = !!active[m];
+          const isCustom = !DEFAULT_MODIFIERS.includes(m);
+          return (
+            <div key={m} style={{ display:"flex", gap:6, alignItems:"stretch" }}>
+              <button onClick={() => !disabled && onToggle(m)} disabled={disabled}
+                style={{ flex:1, display:"flex", alignItems:"center", gap:10, textAlign:"left",
+                  background: on ? "#1a1424" : "#0b0a16", border:`1.5px solid ${on?"#c084fc":"#2d2b42"}`,
+                  borderRadius:8, padding:"9px 12px", cursor: disabled?"not-allowed":"pointer",
+                  opacity: disabled?.5:1, fontFamily:"sans-serif" }}>
+                <span style={{ flexShrink:0, width:16, height:16, borderRadius:4,
+                  border:`1.5px solid ${on?"#c084fc":"#4a4860"}`, background: on?"#c084fc":"transparent",
+                  display:"flex", alignItems:"center", justifyContent:"center", fontSize:11, color:"#1a0a1e" }}>
+                  {on ? "✓" : ""}
+                </span>
+                <span style={{ color: on?"#e9d5ff":"#8b8aa0", fontSize:11.5, lineHeight:1.4 }}>{m}</span>
+              </button>
+              {isCustom && !disabled && (
+                <button onClick={() => onRemoveCustom(m)} title="Delete this custom modifier"
+                  style={{ flexShrink:0, width:34, background:"transparent", border:"1px solid #2d2b42",
+                    borderRadius:8, color:"#8b6a6a", cursor:"pointer", fontSize:14 }}>×</button>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {!disabled && (
+        <>
+          {adding ? (
+            <div style={{ display:"flex", gap:8, marginBottom:10 }}>
+              <input type="text" value={draft} autoFocus placeholder="Type your custom modifier…"
+                onChange={e => setDraft(e.target.value)}
+                onKeyDown={e => { if (e.key === "Enter") submitDraft(); if (e.key === "Escape") { setAdding(false); setDraft(""); } }}
+                style={{ flex:1, background:"#0b0a16", border:"1.5px solid #2d2b42", borderRadius:8,
+                  padding:"9px 11px", color:"#c8c6dc", fontSize:12, outline:"none", fontFamily:"sans-serif" }}/>
+              <button onClick={submitDraft} style={{ padding:"9px 16px", background:"#1e1c2e", border:"1px solid #2d2b42",
+                borderRadius:8, color:"#c9a84c", fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"sans-serif" }}>
+                Add
+              </button>
+            </div>
+          ) : (
+            <button onClick={() => setAdding(true)} style={{ width:"100%", padding:"9px", marginBottom:10,
+              background:"transparent", border:"1px dashed #3a3856", borderRadius:8, color:"#8b8aa0",
+              fontSize:11.5, cursor:"pointer", fontFamily:"sans-serif" }}>
+              + Write a custom modifier
+            </button>
+          )}
+          <button onClick={onResetDefaults} style={{ width:"100%", padding:"8px", background:"transparent",
+            border:"1px solid #2d2b42", borderRadius:8, color:"#5a5876", fontSize:11, cursor:"pointer", fontFamily:"sans-serif" }}>
+            Reset to the default 10, switched on
+          </button>
+        </>
+      )}
+    </div>
+  );
+}
+
+function ModifierBanner({ modifier }) {
+  if (!modifier) return null;
+  return (
+    <div className="fade-up" style={{ marginBottom:12,
+      background:"linear-gradient(135deg,#1a0a1e,#2d0f2d)", border:"2px solid #c084fc",
+      borderRadius:14, padding:"16px 18px" }}>
+      <div style={{ fontSize:11, letterSpacing:".2em", color:"#c084fc", textTransform:"uppercase", marginBottom:6 }}>
+        Today's modifier
+      </div>
+      <div style={{ color:"#e9d5ff", fontSize:13, lineHeight:1.6, marginBottom:8 }}>{modifier}</div>
+      <div style={{ color:"#8b7a95", fontSize:10.5, lineHeight:1.5 }}>
+        Not absolute — skip or adjust it if it hits a limit for you today.
+      </div>
+    </div>
+  );
+}
+
+// ─── RESULTS ──────────────────────────────────────────────────────────────────
+
+function TaskGrid({ rows }) {
+  return (
+    <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(88px, 1fr))", gap:10 }}>
+      {rows.map((r,i) => (
+        <div key={i} style={{ textAlign:"center", background:"#0f0e1a", borderRadius:10, padding:"13px 6px",
+          border: r.punishment ? "1px solid #4a3410" : "1px solid transparent" }}>
+          <div style={{ color:"#6b6a80", fontSize:10, marginBottom:4, lineHeight:1.3 }}>{r.label}</div>
+          <div style={{ color:r.color, fontFamily:"Georgia, serif", fontSize:28, fontWeight:700, lineHeight:1 }}>{r.value}</div>
+          {r.subtext && <div style={{ color:"#4a4860", fontSize:9, marginTop:3 }}>{r.subtext}</div>}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// Every task owed, with punishment dice kept as their own separate line so a
+// renamed punishment die reads as its own activity rather than being folded in.
+// A one-away roll doubles ONLY the target task — doubling everything stacked up
+// far too quickly, especially with punishment dice in play.
+function taskRows(result, names, doubled) {
+  const { aBase, bBase, aPun, bPun, targetRoll } = result;
+  const rows = [
+    { label:names.a, value:aBase, color:"#c9a84c" },
+  ];
+  if (aPun > 0) rows.push({ label:names.aCurse, value:aPun, color:"#e8a020", punishment:true, subtext:"punishment" });
+  rows.push({ label:names.b, value:bBase, color:"#60a5fa" });
+  if (bPun > 0) rows.push({ label:names.bCurse, value:bPun, color:"#a78bfa", punishment:true, subtext:"punishment" });
+  rows.push({
+    label: names.target,
+    value: doubled ? targetRoll * 2 : targetRoll,
+    color: doubled ? "#e74c3c" : "#f472b6",
+    subtext: doubled ? `was ${targetRoll} — doubled` : null,
+  });
+  return rows;
+}
+
+function ResultBanner({ result, names }) {
+  if (!result) return null;
+  const { isWin, isNearMiss, doubled, targetRoll, total, gap } = result;
+  const rows = taskRows(result, names, doubled);
+
+  if (isWin) return (
+    <div style={{ background:"linear-gradient(135deg,#1a1133,#2d1b69)", border:"2px solid #a78bfa",
+      borderRadius:16, padding:"26px 20px", animation:"pulseGlow 2s ease-in-out infinite" }}>
+      <div style={{ textAlign:"center", marginBottom:16 }}>
+        <div style={{ fontSize:11, letterSpacing:".25em", color:"#a78bfa", textTransform:"uppercase", marginBottom:8 }}>Mercy granted</div>
+        <div style={{ fontFamily:"Georgia, serif", fontSize:25, color:"#e8d5ff", fontWeight:700 }}>ORGASM UNLOCKED</div>
+        <div style={{ color:"#c4a8ff", fontSize:12, marginTop:6 }}>
+          Your total and the target both landed on {total}. Complete the tasks below, then enjoy the reward.
+        </div>
+      </div>
+      <TaskGrid rows={rows}/>
+    </div>
+  );
+
+  if (isNearMiss) return (
+    <div style={{ background:"linear-gradient(135deg,#1c0a0a,#2d0f0f)", border:"2px solid #c0392b", borderRadius:16, padding:"20px" }}>
+      <div style={{ textAlign:"center", marginBottom:14 }}>
+        <div style={{ fontSize:11, letterSpacing:".2em", color:"#e74c3c", textTransform:"uppercase", marginBottom:6 }}>One away</div>
+        <div style={{ fontFamily:"Georgia, serif", fontSize:20, color:"#ff8a80", fontWeight:700 }}>So close. So cruel.</div>
+        <div style={{ color:"#e57373", fontSize:12, marginTop:5 }}>
+          You rolled {total}, the target was {targetRoll} — one away. Your{" "}
+          <strong>{names.target}</strong> is doubled, from {targetRoll} to <strong>{targetRoll*2}</strong>.
+          Everything else stands as rolled.
+        </div>
+      </div>
+      <TaskGrid rows={rows}/>
+    </div>
+  );
+
+  return (
+    <div style={{ background:"#11101e", border:"1.5px solid #2d2b42", borderRadius:16, padding:"20px" }}>
+      <div style={{ textAlign:"center", marginBottom:14 }}>
+        <div style={{ fontFamily:"Georgia, serif", fontSize:20, color:"#c9a84c", fontWeight:700, marginBottom:4 }}>Denied</div>
+        <div style={{ color:"#8b8aa0", fontSize:12 }}>
+          You rolled {total}, the target was {targetRoll} — {gap} apart. Complete these before your next roll:
+        </div>
+      </div>
+      <TaskGrid rows={rows}/>
+    </div>
+  );
+}
+
+function EventBanners({ events, names, rerollDone, targetRolls }) {
+  const out = [];
+
+  if (events.surge.triggered) out.push(
+    <div key="surge" className="fade-up" style={{ marginBottom:12,
+      background:"linear-gradient(135deg,#1a0e00,#2d1800)", border:"2px solid #f59e0b",
+      borderRadius:14, padding:"16px 18px", animation:"pulseAmber 2s ease-in-out infinite" }}>
+      <div style={{ fontSize:11, letterSpacing:".2em", color:"#f59e0b", textTransform:"uppercase", marginBottom:6 }}>Bad luck</div>
+      <div style={{ fontFamily:"Georgia, serif", fontSize:17, color:"#fde68a", fontWeight:700, marginBottom:6 }}>
+        Surge — every die rolled high
+      </div>
+      <div style={{ color:"#fbbf24", fontSize:12.5, lineHeight:1.6 }}>
+        All three of your main dice landed in the <strong>top third</strong> of their range — somewhere
+        between once in 9 rolls and once in 22, depending on difficulty. Add those three dice together:
+        that's <strong style={{color:"#fde68a"}}>{events.surge.bonus} extra {names.target}</strong> owed
+        on top of the tasks above.
+      </div>
+    </div>
+  );
+
+  if (events.hush.triggered) out.push(
+    <div key="hush" className="fade-up" style={{ marginBottom:12,
+      background:"linear-gradient(135deg,#041a0a,#0a2d12)", border:"2px solid #22c55e",
+      borderRadius:14, padding:"16px 18px", animation:"pulseGreen 2s ease-in-out infinite" }}>
+      <div style={{ fontSize:11, letterSpacing:".2em", color:"#22c55e", textTransform:"uppercase", marginBottom:6 }}>Rare gift</div>
+      <div style={{ fontFamily:"Georgia, serif", fontSize:17, color:"#86efac", fontWeight:700, marginBottom:6 }}>
+        Hush — every die rolled tiny
+      </div>
+      <div style={{ color:"#4ade80", fontSize:12.5, lineHeight:1.6 }}>
+        All three main dice landed in the <strong>bottom third</strong> of their range — the rarest thing in
+        the game, roughly 1 roll in 25 to 1 in 40. Take a <strong style={{color:"#86efac"}}>free reroll</strong>: tap any die above to roll it again.
+        {targetRolls > 1 && <> Tapping the target rerolls both target dice.</>}
+        {rerollDone && <div style={{ marginTop:6, fontWeight:700 }}>Reroll used. Results updated above.</div>}
+      </div>
+    </div>
+  );
+
+  return out;
+}
+
+// ─── HISTORY PANEL ────────────────────────────────────────────────────────────
+
+function HistoryPanel({ history, open, onToggle, onClear }) {
+  const s = runStats(history);
+  const avg = s.completed.length
+    ? (s.completed.reduce((x,y)=>x+y,0) / s.completed.length).toFixed(1)
+    : null;
+
+  return (
+    <Collapsible
+      title="Your history"
+      right={s.total === 0 ? "no rolls yet" : (s.latestIsWin ? "run complete" : `day ${s.currentDay}`)}
+      open={open} onToggle={onToggle}>
+      {history.length === 0 ? (
+        <div style={{ color:"#5a5876", fontSize:12, lineHeight:1.6 }}>
+          No rolls yet. Once you start, this counts the days of your current run — from your first roll
+          through to the one that finally wins.
+        </div>
+      ) : (
+        <>
+          <div style={{ background:"#0b0a16", borderRadius:12, padding:"16px 14px", textAlign:"center", marginBottom:14 }}>
+            <div style={{ color:"#5a5876", fontSize:10, letterSpacing:".12em", textTransform:"uppercase", marginBottom:6 }}>
+              {s.latestIsWin ? "Last run finished on" : "Current run"}
+            </div>
+            <div style={{ fontFamily:"Georgia, serif", fontSize:38, fontWeight:700, lineHeight:1,
+              color: s.latestIsWin ? "#a78bfa" : "#c9a84c" }}>
+              Day {s.currentDay}
+            </div>
+            <div style={{ color:"#5a5876", fontSize:11, marginTop:7 }}>
+              {s.latestIsWin
+                ? "Mercy granted — your next roll starts a fresh run."
+                : "Days played since your last win."}
+            </div>
+          </div>
+
+          {s.completed.length > 0 && (
+            <div style={{ marginBottom:14 }}>
+              <div style={{ color:"#5a5876", fontSize:10, letterSpacing:".12em", textTransform:"uppercase", marginBottom:8 }}>
+                Finished runs {avg && <span style={{ textTransform:"none", letterSpacing:0 }}>· {avg} days on average</span>}
+              </div>
+              <div style={{ display:"flex", flexWrap:"wrap", gap:6 }}>
+                {s.completed.map((d, i) => (
+                  <div key={i} style={{ background:"#0b0a16", border:"1px solid #221f38", borderRadius:8,
+                    padding:"7px 11px", fontSize:11.5, color:"#a78bfa" }}>
+                    <span style={{ color:"#5a5876" }}>#{i+1}</span> {d} day{d===1?"":"s"}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <button onClick={onClear} style={{ width:"100%", padding:"9px", background:"transparent",
+            border:"1px solid #2d2b42", borderRadius:8, color:"#5a5876", fontSize:11, cursor:"pointer", fontFamily:"sans-serif" }}>
+            Clear history
+          </button>
+        </>
+      )}
+    </Collapsible>
+  );
+}
+
+// ─── DISCORD SUMMARIES ────────────────────────────────────────────────────────
+
+function outcomeOf(result) {
+  return result.isWin ? "win" : result.isNearMiss ? "near" : "denied";
+}
+
+function buildShortSummary({ result, names, username, difficultyKey, level, stats, modifier }) {
+  if (!result) return "";
+  const { aBase, bBase, aPun, bPun, targetRoll, total, gap, isWin, isNearMiss, doubled, events } = result;
+  const tier = DIFFICULTY_TIERS[difficultyKey];
+  const date = new Date().toLocaleDateString("en-GB", { day:"numeric", month:"short" });
+  const who = username && username.trim() ? username.trim() : null;
+
+  const verdict = isWin ? "✨ **MERCY GRANTED**"
+    : isNearMiss ? `⚠️ **ONE AWAY** — ${names.target} doubled`
+    : `🔒 **DENIED** — ${gap} apart`;
+
+  const L = [];
+  L.push("┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄");
+  L.push(`🎲 **Odds of Mercy** · ${who ? who + " · " : ""}${date} · ${tier.label}${level>0?` · ${PUNISHMENT_CONFIGS[level].label}`:""}`);
+  L.push(`Total **${total}** vs target **${targetRoll}** → ${verdict}`);
+  L.push("");
+  L.push(`🔺 ${names.a}: **${aBase}**`);
+  if (aPun > 0) L.push(`🔺 ${names.aCurse}: **${aPun}** _(punishment)_`);
+  L.push(`⬛ ${names.b}: **${bBase}**`);
+  if (bPun > 0) L.push(`⬛ ${names.bCurse}: **${bPun}** _(punishment)_`);
+  L.push(doubled ? `⭐ ${names.target}: **${targetRoll*2}** _(${targetRoll} doubled)_` : `⭐ ${names.target}: **${targetRoll}**`);
+
+  const extras = [];
+  if (events.surge.triggered) extras.push(`⚡ Surge — +${events.surge.bonus} ${names.target}`);
+  if (events.hush.triggered) extras.push("🍀 Hush — free reroll");
+  if (extras.length) { L.push(""); L.push(extras.join(" · ")); }
+
+  if (stats && stats.currentDay > 0) {
+    L.push("");
+    L.push(isWin ? `_Won on day ${stats.currentDay} of this run_` : `_Day ${stats.currentDay} of this run_`);
+  }
+  if (modifier) {
+    L.push("");
+    L.push(`🌀 Today's modifier: ${modifier}`);
+  }
+  L.push("");
+  L.push(`Play: <${GAME_URL}>`);
+  L.push("┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄");
+  return L.join("\n");
+}
+
+function buildLongSummary({ result, level, names, username, difficultyKey, stats, modifier }) {
+  if (!result) return "";
+  const { aRolls, bRolls, targetOptions, targetRoll, aTotal, bTotal, aBase, bBase, aPun, bPun,
+          total, gap, isWin, isNearMiss, doubled, events } = result;
+  const pun = PUNISHMENT_CONFIGS[level];
+  const tier = DIFFICULTY_TIERS[difficultyKey];
+  const cfg = getEffectiveConfig(level, difficultyKey);
+  const range = poolRange(cfg);
+  const date = new Date().toLocaleDateString("en-GB", { weekday:"long", day:"numeric", month:"long", year:"numeric" });
+  const who = username && username.trim() ? username.trim() : null;
+
+  const L = [];
+  L.push("━━━━━━━━━━━━━━━━━━━━━━━━");
+  L.push("## 🎲 Odds of Mercy");
+  L.push(who ? `**${who}** · ${date}` : date);
+  L.push("");
+  L.push("> **How it works:** roll two dice and add them together. A third die sets a target.");
+  L.push("> If both land on the same number, mercy is granted. If not, the numbers rolled");
+  L.push(`> become tasks owed before rolling again. Land one away and the ${names.target} doubles.`);
+  L.push("");
+  L.push(`**Difficulty:** ${tier.label} — total lands on ${range.min}–${range.max}, target lands on 1–${cfg.targetDie}${tier.targetRolls>1?` (rolled ${tier.targetRolls}×, closest counts)`:""} · about ${tier.avgDays} days per win`);
+  L.push(`**Punishment:** ${pun.label} (${pun.plain})`);
+  L.push("");
+  L.push("**🎲 The roll**");
+  L.push(`${names.a} — **${aBase}**`);
+  if (aPun > 0) L.push(`${names.aCurse} (punishment) — **${aRolls.slice(1).join(" + ")}** = **${aPun}**`);
+  L.push(`${names.b} — **${bBase}**`);
+  if (bPun > 0) L.push(`${names.bCurse} (punishment) — **${bRolls.slice(1).join(" + ")}** = **${bPun}**`);
+  if (targetOptions.length > 1) {
+    L.push(`${names.target} target — rolled **${targetOptions.join("** and **")}**, closest counts: **${targetRoll}**`);
+  }
+  L.push("");
+  L.push(`**My total: ${total}**  ·  **Target: ${targetRoll}**`);
+  L.push("");
+
+  if (isWin) {
+    L.push("### ✨ MERCY GRANTED — orgasm unlocked");
+    L.push(`Both landed on ${total}. Tasks still owed:`);
+  } else if (isNearMiss) {
+    L.push(`### ⚠️ ONE AWAY — ${names.target} doubled`);
+    L.push(`${total} against a target of ${targetRoll} — one away, so the ${names.target} doubles. Everything else stands as rolled:`);
+  } else {
+    L.push("### 🔒 DENIED");
+    L.push(`${total} against a target of ${targetRoll} — ${gap} apart. Tasks owed before the next roll:`);
+  }
+  L.push(`- **${names.a}:** ${aBase}`);
+  if (aPun > 0) L.push(`- **${names.aCurse}:** ${aPun} _(punishment)_`);
+  L.push(`- **${names.b}:** ${bBase}`);
+  if (bPun > 0) L.push(`- **${names.bCurse}:** ${bPun} _(punishment)_`);
+  L.push(doubled
+    ? `- **${names.target}:** ${targetRoll*2} _(${targetRoll} doubled for landing one away)_`
+    : `- **${names.target}:** ${targetRoll}`);
+
+  if (events.surge.triggered) {
+    L.push("");
+    L.push(`**⚡ Surge:** every one of the three main dice rolled in the top third of its range. Add those three together: **${events.surge.bonus} extra ${names.target}** owed on top of the list above.`);
+  }
+  if (events.hush.triggered) {
+    L.push("");
+    L.push(`**🍀 Hush:** every one of the three main dice rolled in the bottom third of its range — the rarest roll in the game. Free reroll earned.`);
+  }
+
+  if (stats && stats.currentDay > 0) {
+    L.push("");
+    L.push(isWin
+      ? `**📊 Run complete —** won on day ${stats.currentDay}.${stats.completed.length > 1 ? ` _(earlier runs: ${stats.completed.slice(0,-1).join(", ")} days)_` : ""}`
+      : `**📊 This run:** day ${stats.currentDay}.${stats.completed.length ? ` _(previous runs: ${stats.completed.join(", ")} days)_` : ""}`);
+  }
+
+  if (modifier) {
+    L.push("");
+    L.push(`**🌀 Today's modifier:** ${modifier}`);
+    L.push("_Not absolute — skip or adjust it if it hits a limit._");
+  }
+
+  L.push("");
+  L.push(`**Play it yourself:** <${GAME_URL}>`);
+  L.push("━━━━━━━━━━━━━━━━━━━━━━━━");
+  return L.join("\n");
+}
+
+function CopyFallback({ text, onClose }) {
+  return (
+    <div onClick={onClose} style={{ position:"fixed", inset:0, background:"rgba(0,0,0,.82)", zIndex:1000,
+      display:"flex", alignItems:"center", justifyContent:"center", padding:16 }}>
+      <div onClick={e => e.stopPropagation()} style={{ background:"#13112a", border:"1.5px solid #2d2b42",
+        borderRadius:14, padding:20, width:"100%", maxWidth:480 }}>
+        <div style={{ color:"#c9a84c", fontSize:13, fontWeight:700, marginBottom:10 }}>Copy this and paste it into Discord:</div>
+        <textarea readOnly value={text} autoFocus onFocus={e => e.target.select()}
+          style={{ width:"100%", height:240, background:"#0b0a16", border:"1px solid #2d2b42", borderRadius:6,
+            color:"#a0a0c0", fontFamily:"monospace", fontSize:11, padding:10, resize:"none", outline:"none" }}/>
+        <button onClick={onClose} style={{ marginTop:10, width:"100%", padding:"10px", background:"#1e1c2e",
+          border:"1px solid #2d2b42", borderRadius:8, color:"#8b8aa0", fontSize:12, cursor:"pointer", fontFamily:"sans-serif" }}>Close</button>
+      </div>
+    </div>
+  );
+}
+
+// ─── MAIN ─────────────────────────────────────────────────────────────────────
+
+function OddsOfMercy() {
+  const [level, setLevel]             = React.useState(0);
+  const [difficulty, setDifficulty]   = React.useState("medium");
+  const [username, setUsername]       = React.useState("");
+  const [names, setNames]             = React.useState({ ...DIE_DEFAULTS });
+  const [namesConfirmed, setNamesConfirmed] = React.useState(false);
+  const [modifierLibrary, setModifierLibrary] = React.useState([...DEFAULT_MODIFIERS]);
+  const [activeModifiers, setActiveModifiers] = React.useState(
+    () => Object.fromEntries(DEFAULT_MODIFIERS.map(m => [m, true]))
+  );
+  const [result, setResult]           = React.useState(null);
+  const [activeModifier, setActiveModifier] = React.useState(null);
+  const [tasksDone, setTasksDone]     = React.useState(false);
+  const [lastRollTs, setLastRollTs]   = React.useState(null);
+  const [rolling, setRolling]         = React.useState(false);
+  const [rolled, setRolled]           = React.useState(false);
+  const [copied, setCopied]           = React.useState("");
+  const [fallbackText, setFallback]   = React.useState(null);
+  const [rerollState, setRerollState] = React.useState("idle");
+  const [howOpen, setHowOpen]         = React.useState(false);
+  const [setupOpen, setSetupOpen]     = React.useState(false);
+  const [histOpen, setHistOpen]       = React.useState(false);
+  const [history, setHistory]         = React.useState([]);
+  const [loaded, setLoaded]           = React.useState(false);
+  const [statsAtRoll, setStatsAtRoll] = React.useState(null);
+  const rollCardRef = React.useRef(null);
+  const namesCardRef = React.useRef(null);
+  const resultRef = React.useRef(null);
+  const remainingMs = useCountdown(lastRollTs);
+  const timeUp = remainingMs <= 0;
+  const canRoll = timeUp && tasksDone;
+
+  // Load saved state once
+  React.useEffect(() => {
+    let alive = true;
+    (async () => {
+      const saved = await storeGet(STORE_KEY);
+      if (alive && saved) {
+        if (Array.isArray(saved.history)) setHistory(saved.history);
+        if (saved.username) setUsername(saved.username);
+        if (saved.difficulty && DIFFICULTY_TIERS[saved.difficulty]) setDifficulty(saved.difficulty);
+        if (typeof saved.level === "number") setLevel(saved.level);
+        if (saved.names) setNames({ ...DIE_DEFAULTS, ...saved.names });
+        if (saved.namesConfirmed) setNamesConfirmed(true);
+        if (Array.isArray(saved.modifierLibrary)) setModifierLibrary(saved.modifierLibrary);
+        if (saved.activeModifiers && typeof saved.activeModifiers === "object") setActiveModifiers(saved.activeModifiers);
+        // Restore an in-progress lock (the browser may have been closed mid-cooldown)
+        if (saved.lastRollTs) setLastRollTs(saved.lastRollTs);
+        if (saved.tasksDone) setTasksDone(true);
+        if (saved.activeModifier !== undefined) setActiveModifier(saved.activeModifier);
+        if (saved.pendingResult) {
+          setResult(saved.pendingResult);
+          setRolled(true);
+        }
+      }
+      if (alive) setLoaded(true);
+    })();
+    return () => { alive = false; };
+  }, []);
+
+  // Persist whenever the durable bits change
+  React.useEffect(() => {
+    if (!loaded) return;
+    storeSet(STORE_KEY, {
+      history, username, difficulty, level, names, namesConfirmed,
+      modifierLibrary, activeModifiers,
+      lastRollTs, tasksDone, activeModifier,
+      pendingResult: rolled ? result : null,
+    });
+  }, [history, username, difficulty, level, names, namesConfirmed, modifierLibrary, activeModifiers, lastRollTs, tasksDone, activeModifier, rolled, result, loaded]);
+
+  // If a name field is left blank, fall back to the default so nothing renders
+  // as an empty gap in the UI or in a Discord post.
+  const shown = Object.keys(DIE_DEFAULTS).reduce((acc, k) => {
+    const v = names[k];
+    acc[k] = (typeof v === "string" && v.trim()) ? v.trim() : DIE_DEFAULTS[k];
+    return acc;
+  }, {});
+
+  const cfg = getEffectiveConfig(level, difficulty);
+  const tier = DIFFICULTY_TIERS[difficulty];
+  const range = poolRange(cfg);
+  const rerollMode = rerollState === "picking";
+  const stats = runStats(history);
+
+  const recordRoll = (r) => {
+    const entry = {
+      date: new Date().toLocaleDateString("en-GB", { day:"numeric", month:"short" }),
+      ts: Date.now(), difficulty, level,
+      total: r.total, target: r.targetRoll, outcome: outcomeOf(r),
+    };
+    const next = [...history, entry];
+    setHistory(next);
+    setStatsAtRoll(runStats(next));
+  };
+
+  const handleModifierToggle = (text) => {
+    setActiveModifiers(prev => ({ ...prev, [text]: !prev[text] }));
+  };
+  const handleModifierAdd = (text) => {
+    setModifierLibrary(prev => prev.includes(text) ? prev : [...prev, text]);
+    setActiveModifiers(prev => ({ ...prev, [text]: true }));
+  };
+  const handleModifierRemoveCustom = (text) => {
+    setModifierLibrary(prev => prev.filter(m => m !== text));
+    setActiveModifiers(prev => { const { [text]: _drop, ...rest } = prev; return rest; });
+  };
+  const handleModifierResetDefaults = () => {
+    setModifierLibrary([...DEFAULT_MODIFIERS]);
+    setActiveModifiers(Object.fromEntries(DEFAULT_MODIFIERS.map(m => [m, true])));
+  };
+
+  const handleNamesChange = (next) => {
+    setNames(next);
+    setNamesConfirmed(true); // editing a name is itself a confirmation
+  };
+
+  const handleRoll = () => {
+    if (rolling || (rolled && !canRoll)) return;
+    if (!namesConfirmed) {
+      setSetupOpen(true);
+      setTimeout(() => {
+        if (namesCardRef.current && namesCardRef.current.scrollIntoView) {
+          try { namesCardRef.current.scrollIntoView({ behavior:"smooth", block:"center" }); } catch (_) {}
+        }
+      }, 60);
+      return;
+    }
+    setRolling(true); setResult(null); setRerollState("idle");
+    setSetupOpen(false); setHowOpen(false);
+    setTimeout(() => {
+      const r = rollAll(getEffectiveConfig(level, difficulty));
+      const activeList = modifierLibrary.filter(m => activeModifiers[m]);
+      const mod = rollModifier(activeList);
+      setResult(r); setRolling(false); setRolled(true);
+      setActiveModifier(mod);
+      setTasksDone(false);
+      setLastRollTs(Date.now());
+      recordRoll(r);
+      if (r.events.hush.triggered) setRerollState("picking");
+      // The verdict is what people actually come back for — scroll to it once
+      // it's mounted. The dice reveal is already staggered by up to ~700ms via
+      // their own delay props, so a short pause here is enough without making
+      // people wait nearly two seconds for the page to move.
+      setTimeout(() => {
+        if (resultRef.current && resultRef.current.scrollIntoView) {
+          try { resultRef.current.scrollIntoView({ behavior:"smooth", block:"start" }); } catch (_) {}
+        }
+      }, 350);
+    }, 950);
+  };
+
+  const handleMarkTasksDone = () => setTasksDone(true);
+
+  const handleReset = () => {
+    setResult(null); setRolled(false); setRolling(false); setCopied("");
+    setFallback(null); setRerollState("idle"); setSetupOpen(true); setStatsAtRoll(null);
+    setActiveModifier(null); setTasksDone(false); setLastRollTs(null);
+  };
+
+  const handleRerollDie = (slot) => {
+    if (rerollState !== "picking" || !result) return;
+    const c = getEffectiveConfig(level, difficulty);
+    const a = [...result.aRolls], b = [...result.bRolls];
+    let t = [...result.targetOptions];
+    if (slot.source === "a")      a[slot.index] = rollD(c.aDice[slot.index]);
+    else if (slot.source === "b") b[slot.index] = rollD(c.bDice[slot.index]);
+    else                          t = t.map(() => rollD(c.targetDie));
+    const updated = computeResult(a, b, t, c);
+    setResult(updated);
+    setRerollState("done");
+    // A reroll can turn a denial into a win, so the stored entry AND the run
+    // figures used by the Discord summary both have to be corrected.
+    setHistory(h => {
+      if (!h.length) return h;
+      const copy = [...h];
+      copy[copy.length-1] = { ...copy[copy.length-1], total:updated.total, target:updated.targetRoll, outcome:outcomeOf(updated) };
+      setStatsAtRoll(runStats(copy));
+      return copy;
+    });
+  };
+
+  const doCopy = async (which) => {
+    const args = { result, level, names: shown, username, difficultyKey: difficulty,
+      stats: statsAtRoll || stats, modifier: activeModifier };
+    const text = which === "short" ? buildShortSummary(args) : buildLongSummary(args);
+    let ok = false;
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      try { await navigator.clipboard.writeText(text); ok = true; } catch (_) {}
+    }
+    if (!ok) {
+      try {
+        const ta = document.createElement("textarea");
+        ta.value = text; ta.setAttribute("readonly","");
+        ta.style.cssText = "position:fixed;top:-9999px;left:-9999px;opacity:0";
+        document.body.appendChild(ta); ta.focus(); ta.select();
+        ok = document.execCommand("copy");
+        document.body.removeChild(ta);
+      } catch (_) {}
+    }
+    if (ok) { setCopied(which); setTimeout(() => setCopied(""), 2500); }
+    else setFallback(text);
+  };
+
+  const aSlots = cfg.aDice.map((sides, i) => ({
+    shape:"triangle", source:"a", index:i, sides,
+    color: i < cfg.aBase ? "#c9a84c" : "#e8a020",
+    label: i < cfg.aBase ? shown.a : shown.aCurse,
+    value: result ? result.aRolls[i] : null, delay: i*180,
+  }));
+  const bSlots = cfg.bDice.map((sides, i) => ({
+    shape:"square", source:"b", index:i, sides,
+    color: i < cfg.bBase ? "#60a5fa" : "#a78bfa",
+    label: i < cfg.bBase ? shown.b : shown.bCurse,
+    value: result ? result.bRolls[i] : null, delay: aSlots.length*180 + i*180,
+  }));
+  const targetDelay = aSlots.length*180 + bSlots.length*180;
+  const allSlots = [...aSlots, ...bSlots];
+
+  return (
+    <div style={{ minHeight:"100vh", background:"radial-gradient(ellipse at top,#13112a,#0b0a16 65%)",
+      color:"#e2e0f0", fontFamily:"sans-serif", paddingBottom:60 }}>
+      {fallbackText && <CopyFallback text={fallbackText} onClose={() => setFallback(null)}/>}
+
+      <div style={{ textAlign:"center", padding:"34px 20px 22px" }}>
+        <h1 style={{ fontFamily:"'Cinzel', Georgia, serif", fontSize:"clamp(26px,6vw,44px)", fontWeight:900, margin:0,
+          background:"linear-gradient(135deg,#c9a84c,#e8c96a 50%,#a07830)", WebkitBackgroundClip:"text",
+          WebkitTextFillColor:"transparent", letterSpacing:".04em", lineHeight:1.15 }}>
+          Odds of Mercy
+        </h1>
+        <div style={{ width:56, height:1.5, background:"linear-gradient(90deg,transparent,#c9a84c,transparent)", margin:"14px auto 0" }}/>
+      </div>
+
+      <div style={{ maxWidth:560, margin:"0 auto", padding:"0 14px" }}>
+
+        <HowItWorks open={howOpen} onToggle={() => setHowOpen(o=>!o)} names={shown} level={level} difficultyKey={difficulty}/>
+
+        <Collapsible title="Set up your game"
+          right={namesConfirmed ? `${tier.label} · ${PUNISHMENT_CONFIGS[level].label}` : "⚠ confirm dice names"}
+          open={setupOpen} onToggle={() => setSetupOpen(o=>!o)}>
+          {rolled && (
+            <div style={{ background:"#1a1828", border:"1px solid #2d2b42", borderRadius:8,
+              padding:"9px 12px", marginBottom:16, color:"#8b8aa0", fontSize:11.5 }}>
+              Settings lock while a roll is active. They'll unlock once you can roll again — or use Reset
+              below to clear the current lock early (only for testing or starting over).
+            </div>
+          )}
+          <UsernameField username={username} onChange={setUsername} disabled={rolled}/>
+          <DifficultySelector difficulty={difficulty} onChange={setDifficulty} disabled={rolled} level={level} names={shown}/>
+          <div style={{ height:1, background:"#1e1c30", margin:"18px 0" }}/>
+          <PunishmentSelector level={level} onChange={setLevel} disabled={rolled}/>
+          <div style={{ height:1, background:"#1e1c30", margin:"18px 0" }}/>
+          <ActionNameEditor names={names} onChange={handleNamesChange} level={level} disabled={rolled}
+            confirmed={namesConfirmed} onConfirm={() => setNamesConfirmed(true)}
+            needsAttention={!namesConfirmed && !rolled} scrollRef={namesCardRef}/>
+          <div style={{ height:1, background:"#1e1c30", margin:"18px 0" }}/>
+          <ModifierEditor library={modifierLibrary} active={activeModifiers}
+            onToggle={handleModifierToggle} onAdd={handleModifierAdd}
+            onRemoveCustom={handleModifierRemoveCustom} onResetDefaults={handleModifierResetDefaults}
+            disabled={rolled}/>
+        </Collapsible>
+
+        {/* Roll */}
+        <div ref={rollCardRef} style={{ scrollMarginTop:12 }}>
+        <Card>
+          <div style={{ display:"flex", alignItems:"baseline", justifyContent:"space-between", marginBottom:4 }}>
+            <div style={{ color:"#8b8aa0", fontSize:11, letterSpacing:".14em", textTransform:"uppercase" }}>Your roll</div>
+            {rerollMode && <span style={{ color:"#22c55e", fontSize:10.5, fontWeight:700 }}>tap a die to reroll</span>}
+          </div>
+          <div style={{ color:"#5a5876", fontSize:11.5, marginBottom:16, lineHeight:1.5 }}>
+            {result ? "Your two dice added together, against the target."
+              : `Add your dice together (lands on ${range.min}–${range.max}) and hope it lands on the same number as the target (1–${cfg.targetDie}).`}
+          </div>
+
+          <div style={{ background:"#0b0a16", border:"1.5px solid #221f38", borderRadius:14, padding:"16px 12px", marginBottom:14 }}>
+            <div style={{ display:"flex", alignItems:"flex-start", justifyContent:"center", flexWrap:"wrap", gap:8, marginBottom:12 }}>
+              {allSlots.map((slot, i) => (
+                <div key={i} style={{ display:"flex", alignItems:"flex-start", gap:8 }}>
+                  {i > 0 && <span style={{ color:"#5a5876", fontSize:18, fontWeight:200, paddingTop:14 }}>+</span>}
+                  <LabelledDie slot={slot} glowing={!!result} rerollMode={rerollMode} onReroll={handleRerollDie}/>
+                </div>
+              ))}
+            </div>
+
+            <div style={{ display:"flex", alignItems:"center", justifyContent:"center", gap:10,
+              background:"#13112a", borderRadius:10, padding:"10px 14px", marginBottom:14 }}>
+              <span style={{ color:"#6b6a80", fontSize:11 }}>Your total</span>
+              <span style={{ fontFamily:"Georgia, serif", fontSize:32, fontWeight:700, lineHeight:1,
+                color: result ? (result.isWin?"#a78bfa":result.isNearMiss?"#e74c3c":"#c9a84c") : "#3d3b58" }}>
+                {result ? result.total : "?"}
+              </span>
+            </div>
+
+            <div style={{ display:"flex", alignItems:"center", justifyContent:"center", gap:10, marginBottom:12 }}>
+              <div style={{ flex:1, height:1, background:"#221f38", maxWidth:60 }}/>
+              <span style={{ color:"#5a5876", fontSize:10, letterSpacing:".1em", fontWeight:700 }}>MUST LAND ON THE SAME NUMBER</span>
+              <div style={{ flex:1, height:1, background:"#221f38", maxWidth:60 }}/>
+            </div>
+
+            <div style={{ display:"flex", flexDirection:"column", alignItems:"center", gap:4 }}>
+              <span style={{ color:"#8b8aa0", fontSize:10, letterSpacing:".12em", textTransform:"uppercase" }}>
+                Target — {shown.target}
+              </span>
+              <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+                {(result ? result.targetOptions : Array(cfg.targetRolls).fill(null)).map((v, i) => {
+                  const isTheOne = result && v === result.targetRoll;
+                  return (
+                    <AnimatedDie key={i} shape="star" value={v} color="#f472b6"
+                      glowing={!!result && isTheOne} dim={!!result && !isTheOne}
+                      delay={targetDelay + i*160} clickable={rerollMode}
+                      onClick={() => rerollMode && handleRerollDie({ source:"target", index:0 })}/>
+                  );
+                })}
+              </div>
+              <span style={{ color:"#4a4860", fontSize:8.5 }}>1–{cfg.targetDie}</span>
+              {cfg.targetRolls > 1 && (
+                <span style={{ color:"#5a5876", fontSize:9.5, textAlign:"center", maxWidth:220, lineHeight:1.4 }}>
+                  {result ? `Closest to your total counts — ${result.targetRoll} is your target.`
+                          : "Rolled twice — whichever lands closest to your total counts."}
+                </span>
+              )}
+            </div>
+          </div>
+
+          {result && (
+            <div className="fade-up" style={{ textAlign:"center", marginBottom:16 }}>
+              <div style={{ display:"inline-block", padding:"8px 16px", borderRadius:20,
+                background: result.isWin?"#241a3d":result.isNearMiss?"#2d1414":"#1a1828",
+                border:`1px solid ${result.isWin?"#a78bfa":result.isNearMiss?"#c0392b":"#2d2b42"}`,
+                color: result.isWin?"#a78bfa":result.isNearMiss?"#e74c3c":"#8b8aa0", fontSize:12.5, fontWeight:700 }}>
+                {result.isWin ? `Both landed on ${result.total} — mercy granted`
+                  : `${result.total} against ${result.targetRoll} — ${result.gap} apart`}
+              </div>
+            </div>
+          )}
+
+          {!result && (
+            <div style={{ display:"flex", gap:10 }}>
+              <button onClick={handleRoll} disabled={rolling}
+                style={{ flex:1, padding:"15px",
+                  background: rolling ? "#1a1828" : "linear-gradient(135deg,#7a5a0c,#c9a84c 50%,#7a5a0c)",
+                  color: rolling ? "#3d3b58" : "#0b0a16",
+                  border: rolling ? "1.5px solid #2d2b42" : "none",
+                  borderRadius:10, fontSize:14, fontWeight:700, fontFamily:"'Cinzel', Georgia, serif", letterSpacing:".08em",
+                  cursor: rolling ? "not-allowed" : "pointer", transition:"all .2s",
+                  boxShadow: rolling ? "none" : "0 4px 18px #c9a84c33" }}>
+                {rolling ? "Rolling…" : "Roll the dice"}
+              </button>
+            </div>
+          )}
+
+          {!rolled && !namesConfirmed && (
+            <div className="fade-up" style={{ marginTop:10, color:"#c084fc", fontSize:11, textAlign:"center" }}>
+              Confirm your dice names in Set Up first — tap Roll to jump there.
+            </div>
+          )}
+        </Card>
+        </div>
+
+        {/* Verdict comes immediately after the dice — this is the answer people scroll for */}
+        {result && (
+          <div ref={resultRef} className="fade-up" style={{ marginBottom:12, scrollMarginTop:12 }}>
+            <ResultBanner result={result} names={shown}/>
+          </div>
+        )}
+
+        {result && (
+          <div className="fade-up" style={{ marginBottom:12 }}>
+            <ModifierBanner modifier={activeModifier}/>
+          </div>
+        )}
+
+        {result && (
+          <EventBanners events={result.events} names={shown}
+            rerollDone={rerollState==="done"} targetRolls={cfg.targetRolls}/>
+        )}
+
+        {/* Roll-again controls: countdown, task gate, reset — secondary once the verdict is known */}
+        {rolled && (
+          <Card>
+            {!canRoll && (
+              <div className="fade-up" style={{ display:"flex", flexDirection:"column", gap:8 }}>
+                <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between",
+                  background:"#13112a", border:"1px solid #221f38", borderRadius:10, padding:"10px 14px" }}>
+                  <span style={{ color:"#6b6a80", fontSize:11.5 }}>
+                    {timeUp ? "Cooldown finished" : "Next roll unlocks in"}
+                  </span>
+                  <span style={{ fontFamily:"Georgia, serif", fontSize:18, fontWeight:700,
+                    color: timeUp ? "#4ade80" : "#c9a84c", fontVariantNumeric:"tabular-nums" }}>
+                    {timeUp ? "00:00:00" : formatCountdown(remainingMs)}
+                  </span>
+                </div>
+
+                {!tasksDone ? (
+                  <button onClick={handleMarkTasksDone} style={{
+                    padding:"12px", background:"#1e1c2e", border:"1.5px solid #4a3a1c", borderRadius:10,
+                    color:"#e8c96a", fontSize:13, fontWeight:700, cursor:"pointer", fontFamily:"sans-serif" }}>
+                    Mark today's tasks complete
+                  </button>
+                ) : (
+                  <div style={{ padding:"10px 14px", background:"#0f2010", border:"1px solid #22c55e",
+                    borderRadius:10, color:"#4ade80", fontSize:12, fontWeight:600, textAlign:"center" }}>
+                    ✓ Tasks marked complete — {timeUp ? "you can roll again" : "waiting on the timer"}
+                  </div>
+                )}
+
+                <div style={{ color:"#5a5876", fontSize:10.5, lineHeight:1.5 }}>
+                  Rolling again needs both: the 24-hour timer run out, and today's tasks marked complete.
+                  {!tasksDone && " Only mark them complete once you've actually finished."}
+                </div>
+              </div>
+            )}
+
+            {canRoll && (
+              <button onClick={handleRoll} style={{
+                width:"100%", padding:"15px", background:"linear-gradient(135deg,#7a5a0c,#c9a84c 50%,#7a5a0c)",
+                color:"#0b0a16", border:"none", borderRadius:10, fontSize:14, fontWeight:700,
+                fontFamily:"'Cinzel', Georgia, serif", letterSpacing:".08em", cursor:"pointer",
+                boxShadow:"0 4px 18px #c9a84c33", marginBottom: canRoll ? 12 : 0 }}>
+                Roll the dice
+              </button>
+            )}
+
+            <div style={{ display:"flex", gap:10, marginTop: canRoll ? 0 : 12 }}>
+              <button onClick={handleReset}
+                onMouseEnter={e => e.currentTarget.style.borderColor="#4a4860"}
+                onMouseLeave={e => e.currentTarget.style.borderColor="#2d2b42"}
+                style={{ flex:1, padding:"11px 16px", background:"transparent", color:"#6b6a80",
+                  border:"1.5px solid #2d2b42", borderRadius:10, fontSize:11.5, fontWeight:600,
+                  fontFamily:"sans-serif", cursor:"pointer", transition:"border-color .2s" }}>
+                Reset (start over / testing)
+              </button>
+            </div>
+          </Card>
+        )}
+
+        {result && (
+          <div className="fade-up" style={{ marginBottom:14 }}>
+            <div style={{ color:"#5a5876", fontSize:10.5, letterSpacing:".1em", textTransform:"uppercase", marginBottom:8 }}>
+              Share to Discord
+            </div>
+            <div style={{ display:"flex", gap:10 }}>
+              <button onClick={() => doCopy("short")}
+                style={{ flex:1, padding:"13px", background: copied==="short"?"#0f2010":"#0f0e1a",
+                  color: copied==="short"?"#4ade80":"#c8c6dc",
+                  border:`1.5px solid ${copied==="short"?"#22c55e":"#2d2b42"}`, borderRadius:10,
+                  fontSize:12.5, fontWeight:700, cursor:"pointer", fontFamily:"sans-serif", transition:"all .3s" }}>
+                {copied==="short" ? "Copied!" : "Short"}
+                <div style={{ fontSize:9.5, fontWeight:400, color:"#5a5876", marginTop:3 }}>
+                  {copied==="short" ? "paste it in" : "4 lines — daily use"}
+                </div>
+              </button>
+              <button onClick={() => doCopy("long")}
+                style={{ flex:1, padding:"13px", background: copied==="long"?"#0f2010":"#0f0e1a",
+                  color: copied==="long"?"#4ade80":"#c8c6dc",
+                  border:`1.5px solid ${copied==="long"?"#22c55e":"#2d2b42"}`, borderRadius:10,
+                  fontSize:12.5, fontWeight:700, cursor:"pointer", fontFamily:"sans-serif", transition:"all .3s" }}>
+                {copied==="long" ? "Copied!" : "Full"}
+                <div style={{ fontSize:9.5, fontWeight:400, color:"#5a5876", marginTop:3 }}>
+                  {copied==="long" ? "paste it in" : "explains the rules"}
+                </div>
+              </button>
+            </div>
+          </div>
+        )}
+
+        <HistoryPanel history={history} open={histOpen} onToggle={() => setHistOpen(o=>!o)}
+          onClear={() => { setHistory([]); setStatsAtRoll(null); }}/>
+
+        <div style={{ textAlign:"center", marginTop:24, color:"#2a2840", fontSize:10, letterSpacing:".1em" }}>
+          ONE ROLL PER DAY · OBEY THE DICE
+        </div>
+      </div>
+    </div>
+  );
+}
+
+    const root = ReactDOM.createRoot(document.getElementById("root"));
+    root.render(<OddsOfMercy />);
+  </script>
+</body>
+</html>
